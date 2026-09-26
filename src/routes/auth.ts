@@ -37,6 +37,17 @@ export default async function authRoutes(app: FastifyInstance) {
   const challengeLimit = rateLimited("authChallenge");
   const verifyLimit = rateLimited("authVerify");
 
+  // Every body on this plugin is annotated with `enforce: false`: ajv is left
+  // describing the payload for the OpenAPI spec but not policing it, so a
+  // rejected body always comes back as one VALIDATION_ERROR carrying the
+  // message and `issues` the handler's Zod parse defined, rather than Fastify
+  // pre-empting it with ajv's wording on a subset of rules. The one thing that
+  // still happens before the handler runs is ajv's type coercion, which v4
+  // only allows disabling factory-wide: send a JSON number for `transaction`
+  // and it is handed over as the string "12345", so that request is rejected
+  // for being non-base64 rather than for being a number. The type error itself
+  // is covered in tests/schemas/auth.test.ts.
+
   app.post(
     "/auth/challenge",
     {
@@ -46,7 +57,7 @@ export default async function authRoutes(app: FastifyInstance) {
         summary: "Request SEP-10 challenge",
         description:
           "Builds an unsigned SEP-10 challenge transaction for the specified account, to be signed by the client wallet.",
-        body: openApiBody(sep10ChallengeRequestSchema),
+        body: openApiBody(sep10ChallengeRequestSchema, { enforce: false }),
         response: {
           200: {
             type: "object",
@@ -75,7 +86,7 @@ export default async function authRoutes(app: FastifyInstance) {
         summary: "Verify SEP-10 challenge transaction",
         description:
           "Verifies the client signature on a SEP-10 challenge transaction and issues JWT access and refresh tokens.",
-        body: openApiBody(sep10VerifyRequestSchema),
+        body: openApiBody(sep10VerifyRequestSchema, { enforce: false }),
         response: {
           200: {
             type: "object",
@@ -150,7 +161,9 @@ export default async function authRoutes(app: FastifyInstance) {
         summary: "Exchange refresh token for access token",
         description:
           "Exchanges a valid refresh token for a new access token and rotated refresh token.",
-        body: openApiBody(z.object({ refreshToken: z.string().min(1).max(512) })),
+        body: openApiBody(z.object({ refreshToken: z.string().min(1).max(512) }), {
+          enforce: false,
+        }),
         response: {
           200: {
             type: "object",
@@ -296,7 +309,8 @@ export default async function authRoutes(app: FastifyInstance) {
           z.object({
             displayName: z.string().min(1).max(40).optional(),
             avatarUrl: z.string().url().nullable().optional(),
-          })
+          }),
+          { enforce: false }
         ),
         response: openApiEnvelope("user"),
       },
