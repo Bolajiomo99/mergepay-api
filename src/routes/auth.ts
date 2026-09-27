@@ -41,12 +41,10 @@ export default async function authRoutes(app: FastifyInstance) {
   // describing the payload for the OpenAPI spec but not policing it, so a
   // rejected body always comes back as one VALIDATION_ERROR carrying the
   // message and `issues` the handler's Zod parse defined, rather than Fastify
-  // pre-empting it with ajv's wording on a subset of rules. The one thing that
-  // still happens before the handler runs is ajv's type coercion, which v4
-  // only allows disabling factory-wide: send a JSON number for `transaction`
-  // and it is handed over as the string "12345", so that request is rejected
-  // for being non-base64 rather than for being a number. The type error itself
-  // is covered in tests/schemas/auth.test.ts.
+  // pre-empting it with ajv's wording on a subset of rules. The type keywords
+  // are kept — they are what makes the spec describe field types — and ajv's
+  // coercion is off factory-wide (see src/app.ts), so the value Zod judges is
+  // the value the client actually sent.
 
   app.post(
     "/auth/challenge",
