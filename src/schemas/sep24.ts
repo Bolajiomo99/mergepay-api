@@ -2,9 +2,11 @@
  * SEP-24 request schemas — issue #366.
  *
  * The canonical Zod schemas for SEP-24 deposit/withdrawal initialization and
- * status requests live in `src/validations/sep24.ts`, which the anchor routes
- * (src/routes/anchors.ts) apply inside their handlers so malformed payloads
- * are rejected with a 400 VALIDATION_ERROR before any anchor I/O happens.
+ * status requests live in `src/validations/sep24.ts`, which both anchor route
+ * files apply inside their handlers (src/routes/anchors.ts for
+ * `/anchors/deposit|withdraw`, src/routes/sep24.ts for
+ * `/api/sep24/deposit|withdraw`) so malformed query strings and payloads are
+ * rejected with a 400 VALIDATION_ERROR before any anchor I/O happens.
  *
  * This module re-exports them under the location the issue names so callers
  * have a single import point and there is exactly one source of truth — the
@@ -18,12 +20,15 @@ export {
   sep24AssetCodeSchema,
   sep24CallbackQuerySchema,
   sep24DepositRequestSchema,
+  sep24ExtraMetadataSchema,
+  sep24InitQuerySchema,
   sep24InteractiveRequestSchema,
   sep24MemoSchema,
   sep24MemoTypeSchema,
   sep24StellarTransactionHashSchema,
   sep24WithdrawRequestSchema,
   type Sep24CallbackQuery,
+  type Sep24InitQuery,
   type Sep24InteractiveRequest,
   type Sep24DepositRequest,
   type Sep24WithdrawRequest,
