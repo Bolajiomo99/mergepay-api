@@ -21,7 +21,6 @@ import { auditTx } from "../services/audit";
 import { serializeAnchorSession } from "../serializers";
 import { validateAsset } from "../services/assets";
 import { rateLimited } from "../lib/rate-limit";
-import { ipKey } from "../services/rate-limit-keys";
 import { openApiBody } from "../lib/openapi";
 import {
   applySep24Callback,
@@ -139,13 +138,7 @@ export default async function sep24Routes(app: FastifyInstance) {
   app.post(
     "/api/sep24/callback",
     {
-      config: {
-        rateLimit: {
-          max: config.SEP24_RATE_LIMIT_MAX,
-          timeWindow: config.SEP24_RATE_LIMIT_WINDOW_MS,
-          keyGenerator: ipKey("sep24.callback"),
-        },
-      },
+      ...rateLimited("sep24Callback"),
       schema: {
         tags: ["SEP-24"],
         summary: "Process SEP-24 anchor callback",

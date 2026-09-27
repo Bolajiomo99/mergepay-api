@@ -40,7 +40,7 @@ Every error — validation, authorization, rate limiting, upstream — uses one 
 | `UNAUTHORIZED` | 401 | Missing or invalid session |
 | `FORBIDDEN` | 403 | Authenticated, but not permitted on this resource |
 | `NOT_FOUND` | 404 | The resource does not exist |
-| `RATE_LIMITED` | 429 | Per-route budget exhausted; `details.retryAfterSeconds` when available |
+| `RATE_LIMITED` | 429 | Per-route budget exhausted; the wait is in the `Retry-After` header |
 | `DUPLICATE_RECORD` | 409 | A unique constraint rejected the write; `details.fields` names the columns |
 | `UPSTREAM_ERROR` | 502 | Horizon or an anchor failed |
 | `SERVICE_UNAVAILABLE` | 503 | The database is unreachable, so the request could not be attempted |
@@ -408,10 +408,14 @@ submission, and anchor routes each get their own bucket. See the table in
 [../README.md](../README.md#rate-limiting) and the policy definitions in
 [../src/lib/rate-limit.ts](../src/lib/rate-limit.ts).
 
-A 429 uses the standard error envelope with `error: "RATE_LIMITED"` and, where
-available, `details.retryAfterSeconds`, alongside the usual `Retry-After` and
-`X-RateLimit-*` headers. It reveals nothing about the caller's identity or
-whether a wallet account is known to the API.
+A 429 uses the standard error envelope with `error.code` / `code` set to
+`RATE_LIMITED`, alongside the usual `Retry-After` and `X-RateLimit-Limit` /
+`X-RateLimit-Remaining` / `X-RateLimit-Reset` headers. The body carries no
+`details`: how long to wait is a property of the limiter, not of the failed
+request, and repeating it in two places invites them to disagree. It also
+reveals nothing about the caller's identity or whether a wallet account is
+known to the API — `/auth/*` budgets are keyed by client IP precisely so that a
+429 cannot be used as an account oracle.
 
 ---
 

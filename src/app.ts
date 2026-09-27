@@ -1,18 +1,17 @@
-import Fastify, { FastifyInstance, FastifyRequest, FastifyServerOptions } from "fastify";
+import Fastify, { FastifyInstance, FastifyServerOptions } from "fastify";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
-import rateLimit from "@fastify/rate-limit";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import path from "node:path";
 import { config } from "./config";
-import { verifyToken } from "./plugins/auth";
 import authPlugin from "./plugins/auth";
 import groupAccessPlugin from "./plugins/group-access";
 import errorHandlerPlugin from "./plugins/error-handler";
 import idempotencyPlugin from "./plugins/idempotency";
 import loggingPlugin from "./plugins/logging";
 import openAPIPlugin from "./plugins/openapi";
+import rateLimitPlugin from "./plugins/rate-limit";
 import { validateAssetConfig } from "./services/assets";
 import authRoutes from "./routes/auth";
 import groupRoutes from "./routes/groups";
@@ -33,34 +32,11 @@ import userGroupsRoutes from "./routes/user-groups";
 import healthRoutes from "./routes/health";
 import { getCorrelationId } from "./lib/correlation";
 import { formatErrorResponse } from "./utils/error-response";
-import { isGlobalRateLimitExempt, rateLimitPolicies } from "./lib/rate-limit";
-import { AppError, ErrorCode } from "./lib/errors";
 import { buildLoggerOptions, nullLogDestination } from "./lib/logger";
 import { buildCorsOptions } from "./lib/cors";
-import { PrismaRateLimitStore } from "./services/rate-limit-store";
 import { getReadiness } from "./services/health";
 import { installMultipartGuard } from "./lib/multipart-guard";
 import { nanoid } from "nanoid";
-
-/**
- * Global-policy key. Unlike the per-route policies (which run on `preHandler`
- * and can read `req.user`), the global limiter runs on `onRequest`, before any
- * route's authenticate hook, so it resolves the identity from the bearer token
- * itself. An unparseable token deliberately falls back to the client IP so
- * invalid credentials share one bucket instead of minting a fresh one each try.
- */
-function globalRateLimitKey(request: FastifyRequest): string {
-  const authorization = request.headers.authorization;
-  if (authorization?.startsWith("Bearer ")) {
-    try {
-      const user = verifyToken(authorization.slice("Bearer ".length).trim());
-      return `global:user:${user.id}`;
-    } catch {
-      // Invalid credentials are deliberately grouped by client IP.
-    }
-  }
-  return `global:ip:${request.ip}`;
-}
 
 /**
  * Build-time overrides.
@@ -72,6 +48,21 @@ function globalRateLimitKey(request: FastifyRequest): string {
  */
 export interface BuildAppOptions {
   logger?: FastifyServerOptions["logger"];
+  /**
+   * Observes every route as it is declared, before the route plugins below
+   * register it.
+   *
+   * Route plugins are loaded while `buildApp` is still awaiting its own
+   * `register` calls, so a hook attached to the returned instance is always too
+   * late — this is the only place a caller can see the declarations. It exists
+   * for tests/rate-limit-wiring.test.ts, which audits which policy each route
+   * names. Production callers pass nothing.
+   */
+  onRoute?: (routeOptions: {
+    method?: string | string[];
+    url?: string;
+    config?: Record<string, unknown>;
+  }) => void;
 }
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
@@ -131,6 +122,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
       },
     },
   });
+
+  // Declared before any plugin below registers a route, so it observes the
+  // whole table. See BuildAppOptions.onRoute.
+  if (options.onRoute) {
+    app.addHook("onRoute", options.onRoute);
+  }
 
   app.addHook("onRequest", async (request, reply) => {
     const requestId = request.id;
@@ -228,46 +225,13 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
   // onRequest hook instead of reaching an auth guard or spending rate-limit
   // budget it does not need.
   await app.register(cors, buildCorsOptions(config));
-  // Global default limit. Sensitive routes (SEP-10 auth, settlement and
-  // treasury submission, anchor initiation and polling) override this with
-  // their own bucket — see src/lib/rate-limit.ts for the policy table and the
-  // routes that name each policy. Keys are the authenticated user id when
-  // available, otherwise the resolved client IP — never a wallet public key.
-  //
-  // RATE_LIMIT_STORE=database shares counters across instances via Postgres
-  // (src/services/rate-limit-store.ts) and fails OPEN if that store errors
-  // (skipOnError), so a database hiccup degrades to "unlimited" rather than
-  // blocking all traffic. The default "memory" store is per-process and
-  // needs no failure handling of its own.
-  //
-  // errorResponseBuilder must throw an AppError, not a bare body object:
-  // @fastify/rate-limit re-throws whatever this returns, so a plain object
-  // reaches the central error handler without a statusCode and is answered
-  // 500 instead of 429. AppError carries status 429 and the RATE_LIMITED
-  // code, and the handler renders it in the standard error envelope.
-  await app.register(rateLimit, {
-    global: true,
-    max: config.RATE_LIMIT_GLOBAL_MAX,
-    timeWindow: config.RATE_LIMIT_GLOBAL_WINDOW_MS,
-    keyGenerator: globalRateLimitKey,
-    allowList: isGlobalRateLimitExempt,
-    addHeaders: { "x-ratelimit-limit": true, "x-ratelimit-remaining": true, "x-ratelimit-reset": true, "retry-after": true } as any,
-    errorResponseBuilder: () =>
-      // Must be a real Error (AppError), not a bare payload object:
-      // @fastify/rate-limit *throws* whatever this builder returns, and
-      // Fastify's error pipeline — the central error handler below, which
-      // stamps the requestId and the standard JSON envelope — only engages
-      // for Error instances. A bare object bypassed the handler entirely and
-      // surfaced as a 500 INTERNAL_ERROR with the 429 headers already set,
-      // which is precisely the incoherence this builder exists to avoid.
-      // (The builder's request argument is intentionally unused: the error
-      // handler owns the requestId.)
-      new AppError(
-        429,
-        ErrorCode.RATE_LIMITED,
-        "Too many requests. Please retry later."
-      ),
-  });
+  // Rate limiting: the global default bucket plus every per-route tier. The
+  // registration itself (limits, key strategy, store selection, the 429
+  // envelope) lives in src/plugins/rate-limit.ts; the per-route policies live
+  // in src/lib/rate-limit.ts and are named by the routes they guard. Registering
+  // it here — before the route plugins, and before groupAccessPlugin below —
+  // is what lets its onRoute hook append each limit to the right hook.
+  await app.register(rateLimitPlugin);
   // Multipart limits, all explicit. Only /uploads/receipt consumes a multipart
   // body (the SEP-24 anchor flow is JSON end to end), so these bound that one
   // route without touching the JSON routes, which keep their own bodyLimit.

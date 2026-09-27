@@ -1,13 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { config } from "../config";
 import { prisma } from "../db";
 import { Errors } from "../errors";
 import { requireUser } from "../plugins/auth";
 import { requireMembership } from "../services/access";
 import { requireGroupRole } from "../plugins/group-access";
 import { WEBHOOK_EVENT_TYPES } from "../services/event";
-import { ipKey } from "../services/rate-limit-keys";
+import { rateLimited } from "../lib/rate-limit";
 import {
   applySep24Callback,
   sep24CallbackSchema,
@@ -80,13 +79,7 @@ async function sep24CallbackRoute(app: FastifyInstance) {
   app.post(
     "/api/webhooks/sep24",
     {
-      config: {
-        rateLimit: {
-          max: config.SEP24_RATE_LIMIT_MAX,
-          timeWindow: config.SEP24_RATE_LIMIT_WINDOW_MS,
-          keyGenerator: ipKey("sep24.webhook"),
-        },
-      },
+      ...rateLimited("sep24Webhook"),
       schema: {
         tags: ["SEP-24"],
         summary: "Process SEP-24 anchor webhook (HMAC-signed)",

@@ -3,8 +3,9 @@
  *
  * Like tests/rate-limit-policies.test.ts, behaviour is exercised against small
  * self-contained Fastify instances wired the way `rateLimited()` wires a real
- * route: `buildApp()` skips rate limiting under NODE_ENV=test, so asserting
- * 429s through it would prove nothing. Nothing here reads the real clock.
+ * route, so nothing here depends on the rest of the app booting. Which route
+ * names which policy is asserted in tests/rate-limit-wiring.test.ts. Nothing
+ * here reads the real clock.
  */
 import { describe, it, expect } from "vitest";
 import Fastify from "fastify";

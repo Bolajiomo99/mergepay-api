@@ -1,8 +1,8 @@
 /**
- * Issue #538 — rate limiting for sensitive authentication/payment endpoints.
+ * Rate limiting for sensitive authentication/payment endpoints.
  *
- * The per-route policies already exist (src/lib/rate-limit.ts) and are
- * exercised in synthetic Fastify apps elsewhere (tests/rateLimit.test.ts,
+ * The per-route policies live in src/lib/rate-limit.ts and are exercised in
+ * synthetic Fastify apps elsewhere (tests/rateLimit.test.ts,
  * tests/rate-limit-headers.test.ts, tests/rate-limit-policies.test.ts). What
  * those suites cannot catch is a regression in the *real* wiring — e.g.
  * `rateLimited("authChallenge")` accidentally dropped from a route declaration
@@ -38,7 +38,22 @@ const h = vi.hoisted(() => {
   });
   const prisma: any = {
     user: model(),
-    group: model(),
+    // A row complete enough for serializeGroup, so POST /groups reaches 200 and
+    // the suite is measuring the limiter rather than the mock's shape.
+    group: {
+      ...model(),
+      create: vi.fn(async () => ({
+        id: "group_rate_limit_test",
+        name: "Rate limit test group",
+        description: null,
+        createdByUserId: "user_rate_limit_test",
+        treasuryEnabled: false,
+        treasuryAccountPublicKey: null,
+        treasuryRequiredSigners: null,
+        archived: false,
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      })),
+    },
     groupMember: model(),
     expense: model(),
     expenseShare: model(),
@@ -172,7 +187,7 @@ async function exhaustAndAssert(opts: {
   return blocked;
 }
 
-describe("rate limiting on the real app wiring (#538)", () => {
+describe("rate limiting on the real app wiring", () => {
   it("POST /auth/challenge — per-route budget, headers, and 429 envelope", async () => {
     const max = policies.authChallenge.max;
     const client = Keypair.random();
@@ -254,6 +269,85 @@ describe("rate limiting on the real app wiring (#538)", () => {
       payload: { signedXdr: signedXdr() },
       label: "treasury-transactions/:id/confirm",
     });
+  });
+
+  it("POST /groups — per-route budget, headers, and 429 envelope", async () => {
+    const max = policies.groupCreate.max;
+    await exhaustAndAssert({
+      method: "POST",
+      url: "/groups",
+      max,
+      headers: authHeader(),
+      payload: { name: "Rate limit test group" },
+      label: "groups",
+    });
+  });
+
+  it("GET /history — per-route budget, headers, and 429 envelope", async () => {
+    const max = policies.history.max;
+    await exhaustAndAssert({
+      method: "GET",
+      url: "/history",
+      max,
+      headers: authHeader(),
+      label: "history",
+    });
+  });
+
+  it("POST /anchors/webhook — per-route budget, headers, and 429 envelope", async () => {
+    // IP-keyed, like the SEP-10 buckets: the anchor has no Mergepay session.
+    // An unsigned body is rejected by the shared-secret check, which is what
+    // the limiter runs ahead of.
+    const max = policies.anchorWebhook.max;
+    await exhaustAndAssert({
+      method: "POST",
+      url: "/anchors/webhook",
+      max,
+      payload: {},
+      label: "anchors/webhook",
+    });
+  });
+
+  it("exhausting a submission budget leaves the global bucket untouched", async () => {
+    // `POST /groups` and `GET /history` used to hand-write
+    // `config: { rateLimit: { max, timeWindow } }`. @fastify/rate-limit merges
+    // such a route's options onto the *global* ones, so the route silently
+    // inherited the global keyGenerator and counted against the global counter:
+    // creating 10 groups spent 10 of the caller's 100 global requests, and
+    // unrelated global traffic could 429 a route that had spent nothing of its
+    // own. Both now name a policy with its own key prefix.
+    // One identity for the whole exchange: `authHeader()` mints a fresh
+    // SEP-10 public key per call, and a user-keyed policy gives each wallet its
+    // own budget.
+    const headers = authHeader();
+    const groupMax = policies.groupCreate.max;
+    for (let i = 0; i < groupMax; i++) {
+      await app.inject({
+        method: "POST",
+        url: "/groups",
+        headers,
+        payload: { name: "Shared bucket test" },
+      });
+    }
+    const blocked = await app.inject({
+      method: "POST",
+      url: "/groups",
+      headers,
+      payload: { name: "Shared bucket test" },
+    });
+    expect(blocked.statusCode).toBe(429);
+
+    // A different policy keeps its own budget...
+    const otherPolicy = await app.inject({
+      method: "GET",
+      url: "/history",
+      headers,
+    });
+    expect(otherPolicy.statusCode).not.toBe(429);
+
+    // ...and so does the global bucket, which /me is subject to.
+    const global = await app.inject({ method: "GET", url: "/me", headers });
+    expect(global.statusCode).not.toBe(429);
   });
 
   it("auth buckets are keyed by IP — same budget for signed-in and anonymous callers", async () => {

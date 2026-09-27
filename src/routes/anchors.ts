@@ -13,7 +13,6 @@ import {
 } from "../services/withdrawal-status";
 import { auditTx } from "../services/audit";
 import { rateLimited } from "../lib/rate-limit";
-import { ipKey } from "../services/rate-limit-keys";
 import {
   applySep24Callback,
   sep24CallbackSchema,
@@ -257,6 +256,7 @@ export default async function anchorRoutes(app: FastifyInstance) {
     "/anchors/sessions",
     {
       preHandler: [app.authenticate],
+      ...pollLimit,
       schema: {
         tags: ["SEP-24"],
         summary: "List user anchor sessions",
@@ -333,13 +333,7 @@ export default async function anchorRoutes(app: FastifyInstance) {
   app.post(
     "/anchors/webhook",
     {
-      config: {
-        rateLimit: {
-          max: config.SEP24_RATE_LIMIT_MAX,
-          timeWindow: config.RATE_LIMIT_WINDOW_MS,
-          keyGenerator: ipKey("anchor.webhook"),
-        },
-      },
+      ...rateLimited("anchorWebhook"),
       schema: {
         tags: ["SEP-24"],
         summary: "Anchor status webhook",
