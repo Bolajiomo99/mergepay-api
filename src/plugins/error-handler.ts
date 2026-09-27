@@ -37,13 +37,26 @@ function isHorizonError(error: unknown): error is Error & {
   );
 }
 
-export default fp(async function errorHandlerPlugin(app: FastifyInstance) {
-  app.setErrorHandler((err: Error, req: FastifyRequest, reply: FastifyReply) => {
+/**
+ * The field a Zod issue is about, as a dotted path.
+ *
+ * An unrecognized key is the one issue Zod raises with an empty path — the key
+ * is the problem, and it lives in `keys`. Reporting it as `field: ""` tells a
+ * client only that something at the root is wrong, when the whole point of
+ * rejecting unknown keys is that the client learn which one to delete.
+ */
+function zodIssueField(issue: ZodError["errors"][number] | undefined): string {
+  if (!issue) return "";
+  if (issue.code === "unrecognized_keys") return issue.keys?.[0] ?? "";
+  return issue.path.join(".");
+}
+
+export default fp(async function errorHandlerPlugin(app: FastifyInstance) {  app.setErrorHandler((err: Error, req: FastifyRequest, reply: FastifyReply) => {
     const requestId = req.id as string;
 
     if (err instanceof ZodError) {
       const details = err.errors.map((e) => ({
-        field: e.path.join("."),
+        field: zodIssueField(e),
         message: e.message,
         code: e.code,
       }));
@@ -53,7 +66,7 @@ export default fp(async function errorHandlerPlugin(app: FastifyInstance) {
         code: e.code,
       }));
       const first = err.errors[0];
-      const field = first?.path.join(".");
+      const field = zodIssueField(first);
       const message = field ? `${field}: ${first.message}` : first?.message ?? "Validation failed";
 
       return reply.code(400).send(
@@ -67,16 +80,44 @@ export default fp(async function errorHandlerPlugin(app: FastifyInstance) {
     // the Zod-based handlers use. Failing that — falling into the generic 4xx
     // branch below — would let two identical mistakes on two routes surface
     // with two different codes.
+    //
+    // A route whose body is annotated `openApiBody(schema, { enforce: false })`
+    // reaches this branch for one reason only: the payload is not even the right
+    // primitive for a documented field (`transaction: 12345`). Every rule the
+    // Zod schema owns is stripped from that annotation, so nothing here can
+    // second-guess the handler — ajv's job on such a route is to notice the
+    // shape of the mistake, and Zod's is to explain it.
+    //
+    // So this branch is shaped exactly like the Zod branch above: ajv's
+    // `instancePath` ("/transaction") becomes `field`, its `keyword` becomes
+    // `code`, and the top-level message names the first offending field instead
+    // of a bare "Validation failed". A client should not be able to tell which
+    // of the two validators rejected it, and should not lose `issues` when the
+    // answer happened to come from ajv.
     if ((err as any).code === "FST_ERR_VALIDATION") {
-      const details = Array.isArray((err as any).validation)
-        ? (err as any).validation.map((v: any) => ({
-            field: (v?.instancePath ?? "").replace(/^\//, "") || undefined,
-            message: v?.message ?? "Validation failed",
-          }))
-        : undefined;
-      return reply.code(400).send(
-        formatErrorResponse("VALIDATION_ERROR", "Validation failed", requestId, details)
-      );
+      const issues: { path: string[]; field?: string; message: string; code?: string }[] = Array.isArray(
+        (err as any).validation
+      )
+        ? (err as any).validation.map((v: any) => {
+            const field = String(v?.instancePath ?? "").replace(/^\//, "");
+            return {
+              path: field ? field.split(".") : [],
+              field: field || undefined,
+              message: v?.message ?? "Validation failed",
+              code: v?.keyword,
+            };
+          })
+        : [];
+      const details = issues.map((issue) => ({ field: issue.field, message: issue.message }));
+      const first = issues[0];
+      const message = first
+        ? first.field
+          ? `${first.field}: ${first.message}`
+          : first.message
+        : "Validation failed";
+      return reply
+        .code(400)
+        .send(formatErrorResponse("VALIDATION_ERROR", message, requestId, details, issues));
     }
 
     // A body Fastify could not parse at all (malformed JSON) or an empty body

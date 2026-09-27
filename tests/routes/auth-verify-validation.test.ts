@@ -263,21 +263,77 @@ describe("POST /auth/verify — invalid payloads are rejected before verificatio
     expectNoStateChange();
   });
 
-  it("rejects a wrong-typed field with a 400 naming the field", async () => {
-    // Fastify coerces a JSON scalar to the type the route schema documents
-    // before the handler runs, and v4 only lets that be disabled factory-wide,
-    // so a numeric `transaction` arrives as "12345" and is rejected for what it
-    // became. What the endpoint owes the client is a structured 400 naming the
-    // field, never a 500 — the schema's own type error is asserted in
-    // tests/schemas/auth.test.ts.
+  it("reports a wrong type as a type error, judging the value the client sent", async () => {
+    // Fastify's default is to coerce a value to the type the route schema
+    // declares, so this payload would reach the handler as the string "12345"
+    // and be rejected for not being base64. Naming the field and its real type
+    // is the more useful answer, and it is the one the client can act on.
     const res = await verify({ transaction: 12345 });
 
     expect(res.statusCode).toBe(400);
     const body = res.json();
     expect(body.code).toBe("VALIDATION_ERROR");
-    expect(body.error.details.map((d: { field: string }) => d.field)).toEqual([
-      "transaction",
+    expect(body.error.details).toEqual([
+      { field: "transaction", message: expect.stringMatching(/string/i) },
     ]);
+    expect(body.error.message).toMatch(/^transaction: /);
+    expect(body.error.issues).toEqual([
+      expect.objectContaining({ path: ["transaction"], code: "type" }),
+    ]);
+    expectNoStateChange();
+  });
+
+  it.each([
+    ["a boolean", true],
+    ["a number", 12345],
+    ["an array", ["AAAA"]],
+    ["an object", { envelope: "AAAA" }],
+  ])("rejects %s sent for transaction without coercion", async (_label, transaction) => {
+    const res = await verify({ transaction });
+
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.error.details[0].field).toBe("transaction");
+    expect(body.error.message).toMatch(/^transaction: /);
+    expectNoStateChange();
+  });
+
+  it("names an unknown key instead of reporting the root", async () => {
+    // Zod raises `unrecognized_keys` with an empty path, so the offending key
+    // is only visible in the issue's `keys`. Reporting `field: ""` would tell
+    // the client that something at the top level is wrong and nothing about
+    // what to delete.
+    const res = await verify({ transaction: signedChallenge(), signature: "s" });
+
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.error.details.map((d: { field: string }) => d.field)).toContain(
+      "signature"
+    );
+    expectNoStateChange();
+  });
+
+  it("answers a wrong-typed field in the same shape Zod rejections use", async () => {
+    // A client must not be able to tell which validator rejected the request:
+    // same code, same `details`, same `issues`, same field-prefixed message.
+    const schemaRejected = await verify({ transaction: "" });
+    const frameworkRejected = await verify({ transaction: 12345 });
+
+    const shape = (res: { json(): any }) => {
+      const body = res.json();
+      return {
+        status: res.statusCode,
+        code: body.code,
+        messageIsFieldPrefixed: /^transaction: /.test(body.error.message),
+        detailFields: body.error.details.map((d: { field: string }) => d.field),
+        issuePaths: body.error.issues.map((i: { path: string[] }) => i.path),
+      };
+    };
+
+    expect(shape(frameworkRejected)).toEqual({
+      ...shape(schemaRejected),
+      status: 400,
+    });
     expectNoStateChange();
   });
 

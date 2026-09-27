@@ -33,12 +33,19 @@ import { zodToJsonSchema } from "zod-to-json-schema";
  *
  * What is left describes the payload's *shape* — `type`, `properties`,
  * `required`, `items`, `allOf`/`anyOf`/`oneOf`, `$ref`, `description`,
- * `default` — and stays both documented and enforceable. Compositions are
+ * `default` — and is what the OpenAPI spec is built from. Compositions are
  * recursed into rather than removed, so a piped or refined field still shows
  * its type in Swagger (`.length(56).pipe(...)` renders as an `allOf` of
- * strings). Of the leftovers, only `type` can still pre-empt the handler, and
- * only for a field that is not even the right primitive — where ajv's "must be
- * string" is an acceptable answer, still a VALIDATION_ERROR naming the field.
+ * strings).
+ *
+ * Of the leftovers, only `type` can still reject a body, and only for a value
+ * that is not the primitive the field is documented as — `{ "transaction":
+ * 12345 }`. That answer is the correct one, and the error handler renders it in
+ * the same envelope, `details`, and `issues` shape a Zod rejection uses, so a
+ * client cannot tell the two validators apart. ajv's type coercion is disabled
+ * factory-wide (src/app.ts) so the value it judges is the one the client sent.
+ * `required` is emptied above for the same reason: the Zod schema owns which
+ * fields are mandatory.
  */
 const RULE_KEYWORDS = new Set([
   "const",
