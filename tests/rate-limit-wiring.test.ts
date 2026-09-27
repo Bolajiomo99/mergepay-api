@@ -154,6 +154,9 @@ describe("sensitive routes carry the tighter per-route budget", () => {
     ["POST", "/auth/challenge", "authChallenge"],
     ["POST", "/auth/verify", "authVerify"],
     ["POST", "/auth/refresh", "authVerify"],
+    // Expense creation writes a row and starts a payment split, so it is
+    // budgeted on its own rather than drawing on the settlement budget.
+    ["POST", "/groups/:id/expenses", "expenseCreate"],
     // Settlement submission and confirmation.
     ["POST", "/expenses/:id/settle", "settlementCreate"],
     ["POST", "/groups/:id/settlements", "settlementCreate"],
