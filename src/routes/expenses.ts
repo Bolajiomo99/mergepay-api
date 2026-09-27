@@ -33,6 +33,7 @@ import { validateAsset, validateAmount } from "../services/assets";
 import { assertParticipantsCanHoldAsset } from "../services/horizon";
 import { createExpenseSchema, updateExpenseSchema } from "../validations/expense";
 import { expenseListQuerySchema, listGroupExpenses } from "../services/expenses";
+import { rateLimited } from "../lib/rate-limit";
 
 /** Every route in this file takes a single opaque resource id. */
 const idParamSchema = z.object({ id: z.string().min(1).max(64) });
@@ -53,9 +54,20 @@ export default async function expenseRoutes(app: FastifyInstance) {
   // src/plugins/group-access.ts.
 
   // -- create -----------------------------------------------------------------
+  //
+  // Creating an expense is the write that opens a debt for every other
+  // participant, so it carries its own per-user budget rather than spending the
+  // caller's global allowance. The policy is a `preHandler` limit, which runs
+  // after the `app.authenticate` hook above, so the bucket key is the SEP-10
+  // public key from the caller's token and a shared NAT cannot pool one
+  // member's budget against another's. It is its own bucket prefix, so retries
+  // against the settlement routes below never draw down this allowance.
+  const createLimit = rateLimited("expenseCreate");
+
   app.post(
     "/groups/:id/expenses",
     {
+      ...createLimit,
       preHandler: requireGroupRole("member", { param: "id" }),
       schema: {
         tags: ["Expenses"],

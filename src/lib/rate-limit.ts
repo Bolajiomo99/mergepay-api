@@ -41,6 +41,7 @@ export type RateLimitPolicyName =
   | "global"
   | "authChallenge"
   | "authVerify"
+  | "expenseCreate"
   | "settlementCreate"
   | "settlementConfirm"
   | "settlementExecute"
@@ -95,6 +96,18 @@ export function rateLimitPolicies(): Record<RateLimitPolicyName, RateLimitPolicy
       keyBy: "ip",
       prefix: "auth.verify",
       hook: "onRequest",
+    },
+    // Its own bucket, keyed by the authenticated user. Expense creation is the
+    // write that opens an obligation for every other participant, so it is
+    // budgeted separately from the settlement routes that later close it: a
+    // client retrying a settlement cannot spend the allowance guarding expense
+    // creation, and vice versa.
+    expenseCreate: {
+      max: config.RATE_LIMIT_EXPENSE_CREATE_MAX,
+      timeWindow: config.RATE_LIMIT_EXPENSE_CREATE_WINDOW_MS,
+      keyBy: "user-or-ip",
+      prefix: "expense.create",
+      hook: "preHandler",
     },
     settlementCreate: {
       max: config.RATE_LIMIT_SETTLEMENT_CREATE_MAX,
