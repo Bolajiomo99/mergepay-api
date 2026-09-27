@@ -465,6 +465,33 @@ treasury account and, when `treasuryRequiredSigners > 1`, returned in
 exchanges it for an anchor JWT and the interactive deposit/withdraw URL. A signed
 `POST /anchors/webhook` updates session status; the worker also polls.
 
+`/api/sep24/deposit|withdraw` are aliases of the same two routes and share the
+same request contract. Both are validated by the Zod schemas in
+[src/validations/sep24.ts](src/validations/sep24.ts) before the anchor is
+contacted, so a malformed request never reaches an upstream call, the database,
+or the audit log:
+
+- The body is `.strict()`: `assetCode` (1–12 alphanumeric characters,
+  upper-cased), an optional `assetIssuer`, `account`/`to`/`refundAddress` as
+  checksum-valid Stellar public keys, an optional `amount` (required to
+  withdraw) that must be a positive decimal string with at most 7 places, and
+  `memo`/`refundMemo` bounded by their `memoType` (`text` ≤ 28 UTF-8 bytes with
+  no control characters, `id` an unsigned 64-bit integer, `hash` a
+  base64-encoded 32-byte value). `memo` and `memoType` must be supplied
+  together, unknown keys are rejected, and `extraMetadata` is capped at 20 keys
+  and 2 KB serialized.
+- The query string is validated too, and carries nothing but an optional `lang`.
+  A parameter the body does not define — `?asset_code=XLM`, the SEP-24 wire
+  spelling of the body's `assetCode` — is a 400 naming that parameter, not a
+  silently dropped hint that the body then contradicts.
+- The asset is checked against the configured registry *as a pair*: an issuer
+  Mergepay does not issue that asset under is rejected instead of being dropped
+  in favour of the configured one.
+- Every rejection is the shared `VALIDATION_ERROR` envelope with per-field
+  `details` and `issues`. The routes document the same schemas through
+  `openApiBody(..., { enforce: false })`, so Fastify's ajv cannot pre-empt the
+  handler and answer in its own words — the Zod schema is the only validator.
+
 Status tracking (`src/services/anchor.ts`, `src/services/anchor-status.ts`):
 
 - `anchorService.getTransaction` reads `GET /transaction` and validates it with

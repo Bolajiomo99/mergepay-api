@@ -27,6 +27,27 @@ export const sep24CallbackQuerySchema = z
   })
   .strict();
 
+/**
+ * Query parameters accepted when *starting* a SEP-24 deposit or withdrawal.
+ *
+ * The initiation endpoints take their whole request in the JSON body (see
+ * `sep24DepositRequestSchema` / `sep24WithdrawRequestSchema`), so the query
+ * string carries no part of the contract: there is nothing in the body a query
+ * parameter could legitimately override. It is parsed anyway, strictly, so a
+ * typo (`?asset_code=XLM`, the SEP-24 wire spelling, against a camelCase body)
+ * or an injected key is answered with a 400 naming the offending parameter
+ * rather than being silently dropped while the body it contradicts is honoured.
+ *
+ * `lang` is the one exception, tolerated for parity with the callback above so
+ * a client that localises every anchor call it makes is not turned away at the
+ * door; it is bounded like the callback's and never reaches the anchor.
+ */
+export const sep24InitQuerySchema = z
+  .object({
+    lang: z.string().min(2).max(10).optional(),
+  })
+  .strict();
+
 /** A Stellar transaction hash is a 32-byte value encoded as 64 hex chars. */
 export const sep24StellarTransactionHashSchema = z
   .string()
@@ -235,3 +256,4 @@ export type Sep24InteractiveRequest = z.infer<typeof sep24InteractiveRequestSche
 export type Sep24DepositRequest = z.infer<typeof sep24DepositRequestSchema>;
 export type Sep24WithdrawRequest = z.infer<typeof sep24WithdrawRequestSchema>;
 export type Sep24CallbackQuery = z.infer<typeof sep24CallbackQuerySchema>;
+export type Sep24InitQuery = z.infer<typeof sep24InitQuerySchema>;
