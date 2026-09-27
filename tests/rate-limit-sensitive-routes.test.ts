@@ -322,3 +322,186 @@ describe("rate limiting on the real app wiring (#538)", () => {
     expect(body.message).not.toContain("key");
   });
 });
+
+/**
+ * Issue #518 — expense creation is a sensitive financial write and needed its
+ * own per-identity budget.
+ *
+ * The SEP-10 auth and settlement routes were already bounded (issues #538 and
+ * #581), but `POST /groups/:id/expenses` — the write that opens a debt for
+ * every other participant — had no per-route policy and fell back to the
+ * blanket global allowance, which no single caller can exhaust on their own.
+ *
+ * These cases drive the real app through `buildApp()`, so they fail if the
+ * `rateLimited("expenseCreate")` annotation is ever dropped from the route
+ * declaration, and they pin the three properties the issue asks for: a
+ * dedicated budget, the standard headers and 429 envelope, and per-user keys
+ * taken from the SEP-10 token rather than the shared client address.
+ */
+describe("expense creation rate limiting (#518)", () => {
+  /** A stable token per user id, so one user's bucket is reused across calls. */
+  function tokenFor(userId: string) {
+    const token = signToken({
+      id: userId,
+      stellarPublicKey: Keypair.random().publicKey(),
+    });
+    return { authorization: `Bearer ${token}` };
+  }
+
+  const groupUrl = "/groups/00000000-0000-0000-0000-000000000000/expenses";
+
+  /**
+   * A body the route's own Zod schema accepts.
+   *
+   * This matters: Fastify validates the body before any `preHandler` runs, and
+   * the limiter is a `preHandler` policy. A malformed body is therefore
+   * rejected at 400 without ever touching the budget, so a test that spends the
+   * budget has to send a well-formed expense.
+   */
+  function expenseBody(userId: string) {
+    return {
+      title: "Rate limit test expense",
+      amount: "10.0000000",
+      assetCode: "XLM",
+      splitType: "equal",
+      shares: [{ userId }],
+    };
+  }
+
+  it("carries its own budget rather than the global allowance", () => {
+    const policy = policies.expenseCreate;
+    // A dedicated policy, not a copy of the global numbers: a distinct
+    // keying mode, its own bucket prefix, and a preHandler hook so the
+    // authenticated user is resolved before the key is computed.
+    expect(policy.keyBy).toBe("user-or-ip");
+    expect(policy.hook).toBe("preHandler");
+    expect(policy.prefix).toBe("expense.create");
+    expect(policy.max).toBe(config.RATE_LIMIT_EXPENSE_CREATE_MAX);
+    expect(policy.timeWindow).toBe(config.RATE_LIMIT_EXPENSE_CREATE_WINDOW_MS);
+    // Strictly tighter than the blanket allowance it replaces.
+    expect(policy.max).toBeLessThan(policies.global.max);
+  });
+
+  it("POST /groups/:id/expenses — per-route budget, headers, and 429 envelope", async () => {
+    const max = policies.expenseCreate.max;
+    const userId = "user_518_primary";
+    const headers = tokenFor(userId);
+    const blocked = await exhaustAndAssert({
+      method: "POST",
+      url: groupUrl,
+      max,
+      headers,
+      payload: expenseBody(userId),
+      label: "groups/:id/expenses",
+    });
+    // The advertised limit is this policy's, not the global default — proof
+    // the route is wired to `expenseCreate` and not merely inheriting global.
+    expect(blocked.headers["x-ratelimit-limit"]).toBe(String(max));
+    expect(blocked.headers["x-ratelimit-limit"]).not.toBe(String(policies.global.max));
+  });
+
+  it("keys the bucket by the SEP-10 identity, not the client address", async () => {
+    const max = policies.expenseCreate.max;
+    const noisyId = "user_518_noisy";
+    const noisy = tokenFor(noisyId);
+    const neighbour = tokenFor("user_518_neighbour");
+
+    // Same client address, same route, same instant — only the token differs.
+    for (let i = 0; i < max; i++) {
+      const res = await app.inject({
+        method: "POST",
+        url: groupUrl,
+        headers: noisy,
+        payload: expenseBody(noisyId),
+      });
+      expect(res.statusCode, `noisy request ${i + 1}`).not.toBe(429);
+    }
+    const blocked = await app.inject({
+      method: "POST",
+      url: groupUrl,
+      headers: noisy,
+      payload: expenseBody(noisyId),
+    });
+    expect(blocked.statusCode).toBe(429);
+
+    // A different wallet behind the same NAT must not inherit the exhausted
+    // budget, otherwise one noisy member locks out the whole group.
+    const other = await app.inject({
+      method: "POST",
+      url: groupUrl,
+      headers: neighbour,
+      payload: expenseBody("user_518_neighbour"),
+    });
+    expect(other.statusCode).not.toBe(429);
+    expect(other.headers["x-ratelimit-limit"]).toBe(String(max));
+    expect(other.headers["x-ratelimit-remaining"]).toBe(String(max - 1));
+  });
+
+  it("an unauthenticated caller cannot spend a member's budget", async () => {
+    // `app.authenticate` is registered as an instance-level preHandler, so it
+    // runs before the limiter's hook and an anonymous caller is turned away at
+    // 401 without ever being counted. The policy's `user-or-ip` keying is
+    // therefore never reached without an identity here, and no anonymous flood
+    // can exhaust a signed-in member's allowance.
+    const max = policies.expenseCreate.max;
+    for (let i = 0; i < max + 5; i++) {
+      const res = await app.inject({
+        method: "POST",
+        url: groupUrl,
+        payload: expenseBody("user_518_victim"),
+      });
+      expect(res.statusCode, `anonymous request ${i + 1}`).toBe(401);
+    }
+
+    const victimId = "user_518_victim";
+    const victim = tokenFor(victimId);
+    const first = await app.inject({
+      method: "POST",
+      url: groupUrl,
+      headers: victim,
+      payload: expenseBody(victimId),
+    });
+    expect(first.statusCode).not.toBe(429);
+    expect(first.headers["x-ratelimit-remaining"]).toBe(String(max - 1));
+  });
+
+  it("does not spend the settlement budget, and is not spent by it", async () => {
+    const max = policies.expenseCreate.max;
+    const userId = "user_518_cross_policy";
+    const headers = tokenFor(userId);
+
+    // Exhaust expense creation for this identity.
+    for (let i = 0; i < max; i++) {
+      await app.inject({ method: "POST", url: groupUrl, headers, payload: expenseBody(userId) });
+    }
+    expect(
+      (await app.inject({ method: "POST", url: groupUrl, headers, payload: expenseBody(userId) }))
+        .statusCode
+    ).toBe(429);
+
+    // Settlement creation has its own prefix, so the same user still has a full
+    // budget there: exhausting one write must not lock the other.
+    const settlement = await app.inject({
+      method: "POST",
+      url: "/groups/00000000-0000-0000-0000-000000000000/settlements",
+      headers,
+      payload: {},
+    });
+    expect(settlement.statusCode).not.toBe(429);
+    expect(settlement.headers["x-ratelimit-limit"]).toBe(
+      String(policies.settlementCreate.max)
+    );
+  });
+
+  it("reads routes are untouched by the expense creation budget", async () => {
+    const max = policies.expenseCreate.max;
+    const userId = "user_518_reads";
+    const headers = tokenFor(userId);
+    for (let i = 0; i < max; i++) {
+      await app.inject({ method: "POST", url: groupUrl, headers, payload: expenseBody(userId) });
+    }
+    // Listing expenses is a read and keeps the generous general-read budget.
+    const list = await app.inject({ method: "GET", url: groupUrl, headers });
+    expect(list.statusCode).not.toBe(429);
+  });
+});
