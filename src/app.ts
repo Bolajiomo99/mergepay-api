@@ -116,6 +116,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
         ? { ...loggerOptions, stream: nullLogDestination() }
         : loggerOptions),
     bodyLimit: config.JSON_BODY_LIMIT_BYTES,
+    ajv: {
+      customOptions: {
+        // Fastify's default is `coerceTypes: 'array'`, which quietly rewrites a
+        // value to the type the route schema declares before any handler sees
+        // it: a JSON number sent for a string field arrives as "12345". Every
+        // request body in this API is validated by a Zod schema that reports
+        // the field, the rule, and the value's real type, and coercion would
+        // rob it of the last of those — a client sending a number for
+        // `transaction` would be told its base64 was malformed rather than
+        // that it was not a string. Validation belongs to the Zod layer, so
+        // ajv is left describing payloads, not rewriting them.
+        coerceTypes: false,
+      },
+    },
   });
 
   app.addHook("onRequest", async (request, reply) => {
